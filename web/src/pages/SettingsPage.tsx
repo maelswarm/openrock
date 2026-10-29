@@ -4,6 +4,7 @@ import {
   DEFAULT_DEDICATED_MODEL,
   DEFAULT_SETTINGS,
   bedrockModelParams,
+  thinkingOn,
   parseServerAddress,
   serverAddress,
   type BedrockReplySettings,
@@ -290,7 +291,8 @@ function BedrockModelSettings({
   const effortField = (label: string, help?: string) => (
     <Select label={label} value={r.effort && p.effortLevels.includes(r.effort) ? r.effort : ''} options={effortOptions} onChange={(v) => set({ effort: (v || null) as Effort | null })} help={help} />
   );
-  const thinkingOn = p.thinking === 'always' || r.thinking;
+  // What this model will actually do, including when the choice is left to the model.
+  const thinks = thinkingOn(p, r.thinking);
   const facts: string[] = [];
   if (model) {
     if (p.maxOutputTokens) facts.push(`Up to ${p.maxOutputTokens.toLocaleString()} output tokens`);
@@ -377,13 +379,18 @@ function BedrockModelSettings({
 
       {!baseId && (
         <>
-          <Toggle
+          <Select
             label="Thinking"
-            checked={r.thinking}
+            value={r.thinking}
+            options={[
+              { value: 'default', label: "Model's default" },
+              { value: 'on', label: 'On' },
+              { value: 'off', label: 'Off' },
+            ]}
             onChange={(v) => set({ thinking: v })}
-            help="For models where thinking is optional (Claude 3.7 to 5). Thinking tokens are billed as output tokens. Models that always think do so either way."
+            help="For models where thinking is optional. By default Claude Sonnet 5, Opus 5 and Haiku 5.5 think and older Claude models don't; models that always think do so either way. Thinking tokens are billed as output tokens."
           />
-          {r.thinking && (
+          {r.thinking === 'on' && (
             <NumberField
               label="Thinking budget"
               value={r.budgetTokens}
@@ -402,11 +409,11 @@ function BedrockModelSettings({
         <>
           <Toggle
             label="Extended thinking"
-            checked={r.thinking}
-            onChange={(v) => set({ thinking: v })}
-            help={`Thinking tokens are billed as output tokens.${p.noSamplingWhileThinking ? ' While it is on, temperature, Top P and Top K are not sent.' : ''}`}
+            checked={thinks}
+            onChange={(v) => set({ thinking: v ? 'on' : 'off' })}
+            help={`Off by default for this model. Thinking tokens are billed as output tokens.${p.noSamplingWhileThinking ? ' While it is on, temperature, Top P and Top K are not sent.' : ''}`}
           />
-          {r.thinking && (
+          {thinks && (
             <NumberField
               key={`budget-${baseId}`}
               label="Thinking budget"
@@ -424,15 +431,15 @@ function BedrockModelSettings({
         <div className="grid-2">
           <Toggle
             label="Thinking"
-            checked={r.thinking}
-            onChange={(v) => set({ thinking: v })}
-            help={`${p.thinkingOnByDefault ? 'On unless you turn it off.' : 'Off unless you turn it on.'} The model decides how much to think, guided by effort.${
+            checked={thinks}
+            onChange={(v) => set({ thinking: v ? 'on' : 'off' })}
+            help={`${p.thinkingOnByDefault ? 'On' : 'Off'} by default for this model. The model decides how much to think, guided by effort.${
               p.noSamplingWhileThinking ? ' While it is on, temperature, Top P and Top K are not sent.' : ''
             }`}
           />
           {effortField(
             'Effort',
-            !thinkingOn && p.maxEffortWithoutThinking ? `With thinking off this model takes at most ${EFFORT_LABELS[p.maxEffortWithoutThinking].toLowerCase()}; higher levels are sent as that.` : 'How thoroughly it works. Higher uses more tokens.',
+            !thinks && p.maxEffortWithoutThinking ? `With thinking off this model takes at most ${EFFORT_LABELS[p.maxEffortWithoutThinking].toLowerCase()}; higher levels are sent as that.` : 'How thoroughly it works. Higher uses more tokens.',
           )}
         </div>
       )}
@@ -448,7 +455,7 @@ function CustomModels({ models, onChange }: { models: CustomBedrockModel[]; onCh
   return (
     <Section
       title="Your own model IDs"
-      description="Add provisioned throughput, imported models, application inference profiles or anything else by ID or ARN."
+      description="For models the list above can't show, such as when your API key can't read Bedrock's model list, or an ARN from another account. Provisioned throughput, custom, imported and Marketplace models you can see are listed already."
       aside={
         <button className="btn btn-quiet" onClick={() => onChange([...models, { id: '', name: '', images: false, documents: false, video: false }])}>
           <Plus size={14} aria-hidden="true" />

@@ -9,7 +9,7 @@ import {
   type SystemContentBlock,
   type VideoFormat,
 } from '@aws-sdk/client-bedrock-runtime';
-import { bedrockModelParams, type BedrockReplySettings, type Effort, type ModelInfo, type Settings, type TokenUsage } from '@open-rock/shared';
+import { bedrockModelParams, thinkingOn, type BedrockReplySettings, type Effort, type ModelInfo, type Settings, type TokenUsage } from '@open-rock/shared';
 import { friendlyAwsError, runtimeClient } from '../aws/clients.js';
 import { extOf } from '../extract.js';
 import { fileAsText, normalizeHistory, omittedNote } from './history.js';
@@ -146,8 +146,7 @@ async function buildMessages(
 
 /** Whether this reply will think, given the model and the settings. */
 export function thinksFor(baseId: string, r: BedrockReplySettings): boolean {
-  const t = bedrockModelParams(baseId).thinking;
-  return t === 'always' || t === 'builtin' || t === 'effort' || ((t === 'budget' || t === 'adaptive') && r.thinking);
+  return thinkingOn(bedrockModelParams(baseId), r.thinking);
 }
 
 /** The request for one model: only the settings it takes, within its limits. */
@@ -160,18 +159,19 @@ function inputFor(p: BedrockParams, messages: Message[], system: string, relax: 
   const limit = (n: number) => (params.maxOutputTokens ? Math.min(n, params.maxOutputTokens) : n);
   let maxTokens = r.maxTokens === null ? undefined : limit(r.maxTokens);
   const effort = r.effort && params.effortLevels.includes(r.effort) && !relax.noEffort ? r.effort : null;
-  let thinkingOn = false;
+  let thinks = false;
 
   if (!relax.noThinking) {
-    if (params.thinking === 'budget' && r.thinking) {
+    if (params.thinking === 'budget' && thinkingOn(params, r.thinking)) {
       const budget = Math.max(1024, Math.min(r.budgetTokens, (params.maxOutputTokens ?? Infinity) - 1024));
       extra.thinking = { type: 'enabled', budget_tokens: budget };
       // The budget has to fit inside max_tokens, with room left for the answer.
       if (maxTokens !== undefined) maxTokens = limit(Math.max(maxTokens, budget + 2048));
-      thinkingOn = true;
+      thinks = true;
     } else if (params.thinking === 'adaptive' || params.thinking === 'always') {
-      thinkingOn = params.thinking === 'always' || r.thinking;
-      if (thinkingOn) extra.thinking = relax.noDisplay ? { type: 'adaptive' } : { type: 'adaptive', display: 'summarized' };
+      thinks = thinkingOn(params, r.thinking);
+      // Sent even when it's the model's default, so the reply comes with a readable summary of the thinking.
+      if (thinks) extra.thinking = relax.noDisplay ? { type: 'adaptive' } : { type: 'adaptive', display: 'summarized' };
       else if (params.thinkingOnByDefault) extra.thinking = { type: 'disabled' };
     } else if (params.thinking === 'effort' && effort) {
       extra.reasoning_effort = effort;
@@ -179,12 +179,12 @@ function inputFor(p: BedrockParams, messages: Message[], system: string, relax: 
   }
   if (effort && (params.thinking === 'adaptive' || params.thinking === 'always')) {
     // Some models only turn thinking off at effort high or below.
-    const cap = !thinkingOn ? params.maxEffortWithoutThinking : null;
+    const cap = !thinks ? params.maxEffortWithoutThinking : null;
     const level = cap && EFFORT_ORDER.indexOf(effort) > EFFORT_ORDER.indexOf(cap) ? cap : effort;
     extra.output_config = { effort: level };
   }
 
-  if (!(thinkingOn && params.noSamplingWhileThinking)) {
+  if (!(thinks && params.noSamplingWhileThinking)) {
     if (params.temperature && r.temperature !== null && !relax.dropTemperature) inference.temperature = r.temperature;
     if (params.topP && r.topP !== null && !relax.dropTopP && !(params.temperatureOrTopP && inference.temperature !== undefined)) inference.topP = r.topP;
     if (params.topK && r.topK !== null && !relax.dropTopK) {

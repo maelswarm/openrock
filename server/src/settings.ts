@@ -12,6 +12,7 @@ import {
   type DeepPartial,
   type Effort,
   type Settings,
+  type ThinkingChoice,
 } from '@open-rock/shared';
 import { dataPath, ensureDir, config } from './config.js';
 import { HttpError, newId, writeFileAtomic } from './util.js';
@@ -29,6 +30,7 @@ const LEGACY_BEDROCK_KEYS = ['temperature', 'topP', 'maxTokens', 'stopSequences'
 const AUTH_HEADERS: DedicatedAuthHeader[] = ['auto', 'bearer', 'x-api-key', 'api-key', 'raw'];
 const API_STYLES: DedicatedApiStyle[] = ['auto', 'openai', 'ollama'];
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const THINKING_CHOICES: ThinkingChoice[] = ['default', 'on', 'off'];
 /** Model settings that may be left blank (null) to use the server's own default. */
 const NULLABLE_MODEL_KEYS = new Set(['temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'presencePenalty', 'frequencyPenalty', 'seed', 'numGpu', 'numThread']);
 const MODEL_CHOICES: Partial<Record<keyof DedicatedModelSettings, string[]>> = {
@@ -90,7 +92,8 @@ function repliesFrom(raw: unknown, base: BedrockReplySettings): BedrockReplySett
     topP: num(r.topP, base.topP),
     topK: num(r.topK, base.topK),
     stopSequences: isStringList(r.stopSequences) ? r.stopSequences : base.stopSequences,
-    thinking: typeof r.thinking === 'boolean' ? r.thinking : base.thinking,
+    // Settings saved before thinking had a "model's default" stored true or false; false was the untouched default.
+    thinking: typeof r.thinking === 'boolean' ? (r.thinking ? 'on' : 'default') : THINKING_CHOICES.includes(r.thinking as ThinkingChoice) ? (r.thinking as ThinkingChoice) : base.thinking,
     budgetTokens: isNumber(r.budgetTokens) ? r.budgetTokens : base.budgetTokens,
     effort: r.effort === null || EFFORTS.includes(r.effort as Effort) ? (r.effort as Effort | null) : base.effort,
   };
@@ -156,6 +159,7 @@ export function fromStored(stored: unknown): Settings {
   } else {
     s.bedrock.replies = repliesFrom(lb.replies, structuredClone(DEFAULT_SETTINGS.bedrock.replies));
   }
+  s.bedrock.modelReplies = Object.fromEntries(Object.entries(isPlainObject(s.bedrock.modelReplies) ? s.bedrock.modelReplies : {}).map(([id, r]) => [id, repliesFrom(r, s.bedrock.replies)]));
   for (const k of LEGACY_BEDROCK_KEYS) delete (s.bedrock as unknown as Record<string, unknown>)[k];
 
   const legacy = isPlainObject(stored) && isPlainObject(stored.dedicated) ? stored.dedicated : {};

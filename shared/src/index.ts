@@ -31,6 +31,8 @@ export interface ModelPrice {
 }
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+/** For models where thinking is optional. "default" leaves it to the model: newer Claude models think, older ones don't. */
+export type ThinkingChoice = 'default' | 'on' | 'off';
 
 /** How a Bedrock model replies. Numbers left null use the model's own default. Each model only gets what it supports. */
 export interface BedrockReplySettings {
@@ -41,7 +43,7 @@ export interface BedrockReplySettings {
   topK: number | null;
   stopSequences: string[];
   /** Thinking for models where it's optional. */
-  thinking: boolean;
+  thinking: ThinkingChoice;
   /** Thinking budget, for models that take one. */
   budgetTokens: number;
   /** How hard the model works, for models that take an effort level. null = the model's default. */
@@ -151,7 +153,7 @@ export const DEFAULT_REPLIES: BedrockReplySettings = {
   topP: null,
   topK: null,
   stopSequences: [],
-  thinking: false,
+  thinking: 'default',
   budgetTokens: 4096,
   effort: null,
 };
@@ -344,6 +346,13 @@ function claudeParams(family: string, v: number): ModelParams {
     p.thinking = 'budget';
   }
   return p;
+}
+
+/** Whether a model with optional thinking will think, given the choice: "default" follows the model. */
+export function thinkingOn(p: ModelParams, choice: ThinkingChoice): boolean {
+  if (p.thinking === 'always' || p.thinking === 'builtin' || p.thinking === 'effort') return true;
+  if (p.thinking === 'budget' || p.thinking === 'adaptive') return choice === 'on' || (choice === 'default' && p.thinkingOnByDefault);
+  return false;
 }
 
 /** What a Bedrock model accepts, from its base model ID. Unknown models get the settings Converse takes for every model. */

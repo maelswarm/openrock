@@ -206,7 +206,7 @@ test('streams a Bedrock reply, records usage and attaches a PDF natively', async
 });
 
 test('extended thinking streams reasoning and drops temperature', async () => {
-  await json('/api/settings', { method: 'PUT', body: JSON.stringify({ bedrock: { replies: { thinking: true, budgetTokens: 2000, temperature: 0.5, maxTokens: 1000 } } }) });
+  await json('/api/settings', { method: 'PUT', body: JSON.stringify({ bedrock: { replies: { thinking: 'on', budgetTokens: 2000, temperature: 0.5, maxTokens: 1000 } } }) });
   const conv = (await json('/api/conversations', { method: 'POST', body: JSON.stringify({ mode: 'bedrock' }) })).body;
   const events = await sse(`/api/conversations/${conv.id}/messages`, { content: 'Think', attachmentIds: [], mode: 'bedrock', modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0' });
   assert.ok(events.some((e) => e.type === 'reasoning'));
@@ -215,7 +215,7 @@ test('extended thinking streams reasoning and drops temperature', async () => {
   assert.equal(req.body.inferenceConfig.temperature, undefined);
   // The budget has to fit inside max_tokens with room for the answer.
   assert.equal(req.body.inferenceConfig.maxTokens, 2000 + 2048);
-  await json('/api/settings', { method: 'PUT', body: JSON.stringify({ bedrock: { replies: { thinking: false, temperature: null, maxTokens: null } } }) });
+  await json('/api/settings', { method: 'PUT', body: JSON.stringify({ bedrock: { replies: { thinking: 'default', temperature: null, maxTokens: null } } }) });
 });
 
 test('retries without a system prompt for models that reject it', async () => {
@@ -245,7 +245,7 @@ test('retries without a system prompt for models that reject it', async () => {
 test('each Bedrock model is sent only the settings it takes, within its limits', async () => {
   await json('/api/settings', {
     method: 'PUT',
-    body: JSON.stringify({ bedrock: { replies: { temperature: 0.4, topP: 0.9, topK: 20, maxTokens: 100000, effort: 'xhigh', thinking: true } } }),
+    body: JSON.stringify({ bedrock: { replies: { temperature: 0.4, topP: 0.9, topK: 20, maxTokens: 100000, effort: 'xhigh', thinking: 'on' } } }),
   });
   const conv = (await json('/api/conversations', { method: 'POST', body: JSON.stringify({ mode: 'bedrock' }) })).body;
   const ask = async (modelId: string) => {
@@ -288,7 +288,7 @@ test('each Bedrock model is sent only the settings it takes, within its limits',
   assert.equal(body.inferenceConfig.maxTokens, 64000);
 
   // A model's own settings replace the ones for all models, for that model only.
-  const own = { maxTokens: 500, temperature: 0.1, topP: null, topK: null, stopSequences: [], thinking: false, budgetTokens: 4096, effort: null };
+  const own = { maxTokens: 500, temperature: 0.1, topP: null, topK: null, stopSequences: [], thinking: 'off', budgetTokens: 4096, effort: null };
   await json('/api/settings', { method: 'PUT', body: JSON.stringify({ bedrock: { modelReplies: { 'google.gemma-3-12b-it': own } } }) });
   body = await ask('google.gemma-3-12b-it');
   assert.deepEqual(body.inferenceConfig, { maxTokens: 500, temperature: 0.1 });
@@ -297,8 +297,35 @@ test('each Bedrock model is sent only the settings it takes, within its limits',
 
   await json('/api/settings', {
     method: 'PUT',
-    body: JSON.stringify({ bedrock: { modelReplies: {}, replies: { temperature: null, topP: null, topK: null, maxTokens: null, effort: null, thinking: false } } }),
+    body: JSON.stringify({ bedrock: { modelReplies: {}, replies: { temperature: null, topP: null, topK: null, maxTokens: null, effort: null, thinking: 'default' } } }),
   });
+});
+
+test('thinking follows each model unless you choose, and "off" turns it off', async () => {
+  const conv = (await json('/api/conversations', { method: 'POST', body: JSON.stringify({ mode: 'bedrock' }) })).body;
+  const ask = async (modelId: string) => {
+    await sse(`/api/conversations/${conv.id}/messages`, { content: 'Hi', attachmentIds: [], mode: 'bedrock', modelId });
+    return bedrock.runtimeRequests.at(-1)!.body.additionalModelRequestFields;
+  };
+  // Model's default: Sonnet 5 thinks (asked for explicitly, to get a readable summary); Opus 4.7 and Sonnet 4.5 don't.
+  assert.deepEqual(await ask('anthropic.claude-sonnet-5'), { thinking: { type: 'adaptive', display: 'summarized' } });
+  assert.equal(await ask('anthropic.claude-opus-4-7'), undefined);
+  assert.equal(await ask('us.anthropic.claude-sonnet-4-5-20250929-v1:0'), undefined);
+
+  // Off: models that think by default are told not to; Opus 5 then takes effort only up to high.
+  await json('/api/settings', { method: 'PUT', body: JSON.stringify({ bedrock: { replies: { thinking: 'off', effort: 'max' } } }) });
+  assert.deepEqual(await ask('anthropic.claude-sonnet-5'), { thinking: { type: 'disabled' }, output_config: { effort: 'max' } });
+  assert.deepEqual(await ask('anthropic.claude-opus-5'), { thinking: { type: 'disabled' }, output_config: { effort: 'high' } });
+  assert.deepEqual(await ask('anthropic.claude-opus-4-7'), { output_config: { effort: 'max' } });
+
+  // Settings saved before "model's default" existed: false was the untouched default, true meant on.
+  const { fromStored } = await import('../src/settings.js');
+  const old = fromStored({ bedrock: { replies: { thinking: false }, modelReplies: { 'anthropic.claude-sonnet-5': { thinking: false }, x: { thinking: true } } } });
+  assert.equal(old.bedrock.replies.thinking, 'default');
+  assert.equal(old.bedrock.modelReplies['anthropic.claude-sonnet-5'].thinking, 'default');
+  assert.equal(old.bedrock.modelReplies.x.thinking, 'on');
+
+  await json('/api/settings', { method: 'PUT', body: JSON.stringify({ bedrock: { replies: { thinking: 'default', effort: null } } }) });
 });
 
 test('model list survives missing list permissions', async () => {
@@ -487,7 +514,7 @@ test('settings from before the server list move into it', async () => {
 
   // Bedrock reply settings move into `replies`; the old 4096 default becomes "the model's maximum".
   const b = fromStored({ bedrock: { temperature: 0.3, maxTokens: 4096, stopSequences: ['END'], reasoning: { enabled: true, budgetTokens: 3000 }, showLegacy: false } });
-  assert.deepEqual(b.bedrock.replies, { maxTokens: null, temperature: 0.3, topP: null, topK: null, stopSequences: ['END'], thinking: true, budgetTokens: 3000, effort: null });
+  assert.deepEqual(b.bedrock.replies, { maxTokens: null, temperature: 0.3, topP: null, topK: null, stopSequences: ['END'], thinking: 'on', budgetTokens: 3000, effort: null });
   for (const k of ['temperature', 'maxTokens', 'reasoning', 'showLegacy']) assert.ok(!(k in b.bedrock), k);
   assert.equal(fromStored({ bedrock: { maxTokens: 900 } }).bedrock.replies.maxTokens, 900);
 });
