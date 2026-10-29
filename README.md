@@ -1,5 +1,7 @@
 # Open Rock
 
+<img width="2560" height="1540" alt="image" src="https://github.com/user-attachments/assets/02b1006c-6a43-4ecb-9938-49543af013ab" />
+
 One chat app for every AWS Bedrock model and your own Gemma servers. It runs as a website or as a desktop app (Tauri), and both use the same interface.
 
 - **Variable**: Amazon Bedrock, billed per token. Sign in with a Bedrock API key and the model dropdown lists every chat model Bedrock offers in your region, including legacy ones such as Gemma 3 until AWS retires them, plus any provisioned throughput, custom model deployments, imported models and Bedrock Marketplace endpoints (where most Gemma variants live) you've set up. Cross-region inference profiles are picked automatically. You can also add your own model IDs or ARNs.
