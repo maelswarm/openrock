@@ -1,0 +1,161 @@
+/* Open Rock design tokens.
+   The accent follows the active mode: lapis for Variable (Bedrock), malachite for Dedicated (Gemma). */
+
+:root {
+  color-scheme: light;
+  --bg: #f7f8f9;
+  --bg-sunk: #eceff2;
+  --sidebar: #e6e9ed;
+  --surface: #ffffff;
+  --surface-2: #f1f3f5;
+  --ink: #1b2026;
+  --ink-2: #4f5965;
+  --ink-3: #7f8893;
+  --line: #d6dbe0;
+  --line-strong: #bcc3cb;
+  --lapis: #2c5aa0;
+  --lapis-wash: #e3ebf7;
+  --lapis-ink: #ffffff;
+  --malachite: #0f7a64;
+  --malachite-wash: #ddf1ec;
+  --malachite-ink: #ffffff;
+  --ochre: #9a6514;
+  --ochre-wash: #f8ecd6;
+  --danger: #b4332a;
+  --danger-wash: #f9e3e1;
+  --good: #1d7a3a;
+  --code-bg: #f1f3f5;
+  --shadow-pop: 0 12px 32px rgba(27, 32, 38, 0.14), 0 2px 6px rgba(27, 32, 38, 0.08);
+  --scrim: rgba(27, 32, 38, 0.36);
+
+  /* chart */
+  --chart-surface: #f7f8f9;
+  --grid: #e1e5e9;
+  --axis: #c3c9cf;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-other: #a3abb4;
+
+  /* syntax */
+  --hl-keyword: #8a3ab9;
+  --hl-string: #1d7a3a;
+  --hl-number: #a3510d;
+  --hl-comment: #7f8893;
+  --hl-title: #2c5aa0;
+  --hl-attr: #9a6514;
+
+  --font-sans: 'Archivo Variable', 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', Consolas, monospace;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+}
+
+:root[data-mode='bedrock'] {
+  --accent: var(--lapis);
+  --accent-wash: var(--lapis-wash);
+  --accent-ink: var(--lapis-ink);
+}
+:root[data-mode='dedicated'] {
+  --accent: var(--malachite);
+  --accent-wash: var(--malachite-wash);
+  --accent-ink: var(--malachite-ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --bg: #171b20;
+    --bg-sunk: #121519;
+    --sidebar: #111418;
+    --surface: #1f252b;
+    --surface-2: #262d34;
+    --ink: #e6e9ec;
+    --ink-2: #aab3bc;
+    --ink-3: #7b8692;
+    --line: #2c343c;
+    --line-strong: #3d4751;
+    --lapis: #7ea6e8;
+    --lapis-wash: #1f2c40;
+    --lapis-ink: #0f1a2b;
+    --malachite: #4cc2a4;
+    --malachite-wash: #173129;
+    --malachite-ink: #08251d;
+    --ochre: #e0a54a;
+    --ochre-wash: #34291a;
+    --danger: #f08178;
+    --danger-wash: #3a1f1d;
+    --good: #5fcf83;
+    --code-bg: #14181c;
+    --shadow-pop: 0 14px 36px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+    --scrim: rgba(0, 0, 0, 0.5);
+    --chart-surface: #171b20;
+    --grid: #262d34;
+    --axis: #3d4751;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-other: #5d6772;
+    --hl-keyword: #c792ea;
+    --hl-string: #8fd3a1;
+    --hl-number: #f2a66b;
+    --hl-comment: #7b8692;
+    --hl-title: #8fb4f0;
+    --hl-attr: #e0b46a;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #171b20;
+  --bg-sunk: #121519;
+  --sidebar: #111418;
+  --surface: #1f252b;
+  --surface-2: #262d34;
+  --ink: #e6e9ec;
+  --ink-2: #aab3bc;
+  --ink-3: #7b8692;
+  --line: #2c343c;
+  --line-strong: #3d4751;
+  --lapis: #7ea6e8;
+  --lapis-wash: #1f2c40;
+  --lapis-ink: #0f1a2b;
+  --malachite: #4cc2a4;
+  --malachite-wash: #173129;
+  --malachite-ink: #08251d;
+  --ochre: #e0a54a;
+  --ochre-wash: #34291a;
+  --danger: #f08178;
+  --danger-wash: #3a1f1d;
+  --good: #5fcf83;
+  --code-bg: #14181c;
+  --shadow-pop: 0 14px 36px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --scrim: rgba(0, 0, 0, 0.5);
+  --chart-surface: #171b20;
+  --grid: #262d34;
+  --axis: #3d4751;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-other: #5d6772;
+  --hl-keyword: #c792ea;
+  --hl-string: #8fd3a1;
+  --hl-number: #f2a66b;
+  --hl-comment: #7b8692;
+  --hl-title: #8fb4f0;
+  --hl-attr: #e0b46a;
+}

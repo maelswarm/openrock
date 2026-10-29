@@ -1,0 +1,19 @@
+node_modules/
+dist/
+web/dist/
+server/dist/
+data/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+
+# test helper
+server/test/.demo-*

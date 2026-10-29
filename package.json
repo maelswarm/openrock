@@ -1,0 +1,38 @@
+{
+  "name": "open-rock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chat with any AWS Bedrock model or your own dedicated Gemma server, on the web or desktop.",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm -w @open-rock/server run dev",
+    "dev:web": "npm -w @open-rock/web run dev",
+    "build": "npm run build:web && npm run build:server",
+    "build:web": "npm -w @open-rock/web run build",
+    "build:server": "npm -w @open-rock/server run build",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "start": "node server/dist/index.mjs",
+    "typecheck": "npm -w @open-rock/server run typecheck && npm -w @open-rock/web run typecheck",
+    "test": "npm -w @open-rock/server run test",
+    "desktop:dev": "node scripts/build-sidecar.mjs && tauri dev",
+    "desktop:build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "bun": "^1.4.2",
+    "concurrently": "^10.0.6"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "overrides": {
+    "katex": "^0.19.0"
+  }
+}
