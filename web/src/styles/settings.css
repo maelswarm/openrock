@@ -574,3 +574,8 @@ input[type='password']::-ms-clear {
 .server-answer li + li {
   margin-top: 6px;
 }
+.set-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

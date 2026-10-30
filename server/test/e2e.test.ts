@@ -354,7 +354,7 @@ test('reports Gemma server status with detected protocol and context size', asyn
 });
 
 test('dedicated chat sends the bearer token, sampling options and images (OpenAI-compatible)', async () => {
-  await setServer({ minP: 0.05, seed: 7, stop: ['<end>'] }, { systemPrompt: 'You are Gemma.' });
+  await setServer({ topK: 40, minP: 0.05, seed: 7, stop: ['<end>'] }, { systemPrompt: 'You are Gemma.' });
   const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
   const form = new FormData();
   form.append('file', new File([png], 'dot.png', { type: 'image/png' }));
@@ -372,7 +372,9 @@ test('dedicated chat sends the bearer token, sampling options and images (OpenAI
   assert.equal(req.body.model, 'google/gemma-3-27b-it');
   assert.equal(req.body.messages[0].role, 'system');
   assert.equal(req.body.max_tokens, 1024);
-  assert.equal(req.body.top_k, 64);
+  assert.equal(req.body.top_k, 40);
+  // Sampling left blank is left to the model.
+  assert.equal(req.body.temperature, undefined);
   assert.equal(req.body.min_p, 0.05);
   assert.equal(req.body.seed, 7);
   assert.deepEqual(req.body.stop, ['<end>']);
@@ -494,7 +496,7 @@ test('dedicated always uses HTTPS, port 443 by default, and no server is built i
 
 test('settings from before the server list move into it', async () => {
   const { fromStored } = await import('../src/settings.js');
-  const old = fromStored({ dedicated: { port: 8443, apiKey: 'old-token', displayName: 'Box', model: 'gemma3:4b', authHeader: 'raw', contextSize: 4096, systemPrompt: 'Hi.' } });
+  const old = fromStored({ dedicated: { port: 8443, apiKey: 'old-token', displayName: 'Box', model: 'gemma3:4b', authHeader: 'raw', contextSize: 4096, topK: 64, systemPrompt: 'Hi.' } });
   const [srv] = old.dedicated.servers;
   assert.deepEqual(
     { id: srv.id, name: srv.name, host: srv.host, port: srv.port, apiKey: srv.apiKey, authHeader: srv.authHeader, apiStyle: srv.apiStyle, model: srv.model },
@@ -503,6 +505,7 @@ test('settings from before the server list move into it', async () => {
   // Model settings that used to apply to every server move onto it; the system prompt stays shared.
   assert.equal(srv.contextSize, 4096);
   assert.equal(srv.topK, 64);
+  assert.equal(srv.temperature, null);
   assert.equal(old.dedicated.systemPrompt, 'Hi.');
   for (const k of ['port', 'apiKey', 'displayName', 'model', 'authHeader', 'contextSize']) assert.ok(!(k in old.dedicated), k);
   // Servers saved before model settings lived on them get the old shared values.
@@ -571,6 +574,102 @@ test('several servers: each is a model-menu entry and chats go to the one picked
   assert.ok(err && err.type === 'error' && /removed/.test(err.message), JSON.stringify(gone));
 
   await json('/api/settings', { method: 'PUT', body: JSON.stringify({ dedicated: { servers: [first] } }) });
+});
+
+test('a dedicated server can run any model, and what the model can do decides what is offered and sent', async () => {
+  const box = await startGemmaMock({ tls: true });
+  const [first] = (await json('/api/settings')).body.settings.dedicated.servers;
+  const put = (patch: Record<string, unknown> = {}) =>
+    json('/api/settings', { method: 'PUT', body: JSON.stringify({ dedicated: { servers: [first, { ...SERVER, id: 'any', name: 'Any', port: box.port, apiKey: DEDICATED_TOKEN, ...patch }] } }) });
+  const check = async () => (await json('/api/dedicated/status?server=any')).body;
+  const caps = async () => (await json('/api/models?mode=dedicated')).body.models.find((m: { id: string }) => m.id === 'any').capabilities;
+  const chat = async (content: string, attachmentIds: string[] = []) => {
+    const conv = (await json('/api/conversations', { method: 'POST', body: JSON.stringify({ mode: 'dedicated' }) })).body;
+    return sse(`/api/conversations/${conv.id}/messages`, { content, attachmentIds, mode: 'dedicated', modelId: 'any' });
+  };
+  const last = (p: string) => box.requests.filter((r) => r.path === p).at(-1)!;
+  const noticed = (events: StreamEvent[], re: RegExp) => events.some((e) => e.type === 'notice' && re.test(e.message));
+  const form = new FormData();
+  form.append('file', new File([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')], 'dot.png', { type: 'image/png' }));
+  const img = ((await (await app.request('/api/files', { method: 'POST', headers: { 'x-open-rock-client': 'test' }, body: form })).json()) as { id: string }).id;
+  try {
+    // Ollama running Qwen3: Ollama says it thinks and doesn't read images.
+    box.style = 'ollama';
+    box.model = 'qwen3:8b';
+    box.capabilities = ['completion', 'thinking'];
+    await put();
+    const st = await check();
+    assert.deepEqual([st.ok, st.vision, st.thinking], [true, false, true], st.message);
+    assert.deepEqual([(await caps()).images, (await caps()).reasoning], [false, true]);
+    await chat('Hi');
+    // Asked to think, so Ollama returns the thinking apart from the reply. Sampling is left to the model.
+    assert.equal(last('/api/chat').body.think, true);
+    assert.equal(last('/api/chat').body.options.temperature, undefined);
+    await put({ thinking: 'off' });
+    await chat('Hi');
+    assert.equal(last('/api/chat').body.think, false);
+    // An image in the chat anyway (sent earlier, or to another model) is left out with a note.
+    const ev = await chat('What is this?', [img]);
+    assert.ok(noticed(ev, /doesn't read images/), JSON.stringify(ev));
+    assert.equal(last('/api/chat').body.messages.at(-1).images, undefined);
+
+    // Gemma 3 on Ollama doesn't think, so it gets no "think" (Ollama refuses it for such models).
+    box.model = 'gemma3:27b';
+    box.capabilities = ['completion', 'vision'];
+    await check();
+    assert.deepEqual([(await caps()).images, (await caps()).reasoning], [true, false]);
+    await chat('Hi');
+    assert.equal(last('/api/chat').body.think, undefined);
+
+    // vLLM running gpt-oss, which says nothing about the model: its name says it reasons, at an effort.
+    box.style = 'openai';
+    box.model = 'openai/gpt-oss-20b';
+    await put({ reasoningEffort: 'high' });
+    await check();
+    assert.deepEqual([(await caps()).images, (await caps()).reasoning], [false, true]);
+    await chat('Hi');
+    assert.equal(last('/v1/chat/completions').body.reasoning_effort, 'high');
+    assert.equal(last('/v1/chat/completions').body.chat_template_kwargs, undefined);
+
+    // Qwen3 on vLLM: thinking is switched through the chat template, and <think> left in the text becomes thinking.
+    box.model = 'Qwen/Qwen3-8B';
+    box.reply = ['<thi', 'nk>Let me', ' see.</th', 'ink>\n\nHello', ' there'];
+    await put({ thinking: 'on' });
+    await check();
+    const thought = await chat('Hi');
+    assert.deepEqual(last('/v1/chat/completions').body.chat_template_kwargs, { enable_thinking: true });
+    assert.equal(textOf(thought), 'Hello there');
+    assert.equal(thought.map((e) => (e.type === 'reasoning' ? e.text : '')).join(''), 'Let me see.');
+    const saved = (await json(`/api/conversations/${(thought.find((e) => e.type === 'start') as { conversation: { id: string } }).conversation.id}`)).body;
+    assert.equal(saved.messages.at(-1).reasoning, 'Let me see.');
+
+    // A model nobody describes, that turns out to be text-only: the image is dropped once, then no longer offered.
+    box.model = 'meta-llama/Llama-3.1-8B-Instruct';
+    box.reply = undefined;
+    box.textOnly = true;
+    await put();
+    await check();
+    assert.deepEqual([(await caps()).images, (await caps()).reasoning], [true, false]);
+    const before = box.requests.length;
+    const refused = await chat('What is this?', [img]);
+    assert.equal(textOf(refused), 'Hello from Gemma', JSON.stringify(refused));
+    assert.ok(noticed(refused, /Llama-3\.1-8B-Instruct doesn't read images/), JSON.stringify(refused));
+    const sent = box.requests.slice(before).filter((r) => r.path === '/v1/chat/completions');
+    assert.equal(sent.length, 2);
+    assert.match(sent[1].body.messages.at(-1).content, /dot\.png[\s\S]*What is this\?/);
+    assert.equal((await caps()).images, false);
+    assert.equal((await check()).vision, false);
+
+    // The server's own context limit wins over a larger setting.
+    await put({ contextSize: 65536 });
+    const fitted = await chat('Hi');
+    const ctx = fitted.find((e) => e.type === 'context');
+    assert.ok(ctx && ctx.type === 'context');
+    assert.equal(ctx.context.contextSize, 32768);
+  } finally {
+    await json('/api/settings', { method: 'PUT', body: JSON.stringify({ dedicated: { servers: [first] } }) });
+    await box.close();
+  }
 });
 
 test('the .env token is only sent to the .env server', async () => {

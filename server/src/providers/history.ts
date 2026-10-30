@@ -1,7 +1,7 @@
 import type { NeutralMessage } from './types.js';
 
 /**
- * Make history safe for strict chat templates (Bedrock, Gemma): no empty assistant turns,
+ * Make history safe for strict chat templates (Bedrock, Gemma and other local models): no empty assistant turns,
  * strictly alternating roles, starts and ends with the user.
  */
 export function normalizeHistory(messages: NeutralMessage[]): NeutralMessage[] {

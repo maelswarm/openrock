@@ -5,6 +5,9 @@ import {
   DEFAULT_SETTINGS,
   bedrockModelParams,
   thinkingOn,
+  localModelHint,
+  localReadsImages,
+  localThinking,
   parseServerAddress,
   serverAddress,
   type BedrockReplySettings,
@@ -14,18 +17,20 @@ import {
   type DedicatedServer,
   type DedicatedSettings,
   type Effort,
+  type LocalEffort,
   type ModelInfo,
   type ModelParams,
   type ModelPrice,
   type Settings,
   type TestResult,
+  type ThinkingChoice,
 } from '@open-rock/shared';
 import { currentServer, useStore } from '../lib/store';
 import { api } from '../lib/api';
 import type { SettingsTab } from '../lib/route';
 import { Field, NumberField, Section, Segmented, Select, TagInput, TextArea, TextField, Toggle } from '../components/fields';
 import { compact } from '../lib/format';
-import { EFFORT_LABELS, gemmaHint, retireDate } from '../lib/models';
+import { EFFORT_LABELS, retireDate } from '../lib/models';
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'variable', label: 'Variable' },
@@ -574,7 +579,7 @@ function PriceRow({ k, p, onCommit, onRemove }: { k: string; p: ModelPrice; onCo
   );
 }
 
-// ---------------- Dedicated (Gemma) ----------------
+// ---------------- Dedicated (your own servers) ----------------
 
 const AUTH_LABELS: Record<string, string> = {
   bearer: 'Authorization: Bearer',
@@ -584,6 +589,9 @@ const AUTH_LABELS: Record<string, string> = {
 };
 
 const CTX_PRESETS = [4096, 8192, 16384, 32768, 65536, 131072];
+
+const SAMPLING_KEYS = ['temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'presencePenalty', 'frequencyPenalty', 'seed'] as const;
+const MODEL_DEFAULT_SAMPLING = Object.fromEntries(SAMPLING_KEYS.map((k) => [k, null])) as Partial<DedicatedModelSettings>;
 
 function newServer(): DedicatedServer {
   return {
@@ -684,7 +692,10 @@ function DedicatedSettingsView({ settings }: { settings: Settings }) {
   );
 }
 
-/** One server's model settings, showing only what its protocol uses, next to what the server reports about its model. */
+/**
+ * One server's model settings, showing only what its protocol and model use, next to what the server reports about the
+ * model (or, when it doesn't say, what's known from the model's name).
+ */
 function DedicatedModelSettingsView({
   server: m,
   servers,
@@ -700,29 +711,43 @@ function DedicatedModelSettingsView({
   const name = m.name || m.host || 'New server';
   const protocol = m.apiStyle !== 'auto' ? m.apiStyle : status?.ok ? status.apiStyle : undefined;
   const modelName = m.model || status?.models[0] || '';
-  const hint = gemmaHint(modelName);
-  const serverCtx = status?.contextSize;
+  const model = modelName || 'This model';
+  const hint = localModelHint(modelName);
+  const known = hint?.family ?? 'from its name';
+  const serverCtx = status?.ok ? status.contextSize : undefined;
   const overServer = !!serverCtx && m.contextSize > serverCtx;
   const maxCtx = serverCtx ?? hint?.contextSize;
-  const maxCtxLabel = serverCtx ? 'Server max' : hint ? `${hint.family} max` : '';
+  const maxCtxLabel = serverCtx ? 'Server max' : hint?.family ? `${hint.family} max` : 'Model max';
   const serverVision = status?.ok ? status.vision : undefined;
+  const modelVision = serverVision ?? hint?.vision;
+  const sendsImages = localReadsImages(m, modelName, serverVision);
+  const serverThinking = status?.ok ? status.thinking : undefined;
+  const thinking = localThinking(modelName, serverThinking);
   const extraError = extraBodyError(m.extraBody);
+  const hasSampling = SAMPLING_KEYS.some((k) => m[k] !== null);
 
-  const reply = Math.min(m.maxTokens, m.contextSize);
-  const margin = Math.min(m.safetyMarginTokens, m.contextSize - reply);
-  const input = Math.max(0, m.contextSize - reply - margin);
+  // The server's own limit wins over a larger setting, so that's what the budget shows.
+  const ctx = overServer ? serverCtx! : m.contextSize;
+  const reply = Math.min(m.maxTokens, ctx);
+  const margin = Math.min(m.safetyMarginTokens, ctx - reply);
+  const input = Math.max(0, ctx - reply - margin);
 
   const facts: string[] = [];
   if (protocol) facts.push(protocol === 'ollama' ? 'Ollama' : 'OpenAI-compatible');
   if (serverCtx) facts.push(`${serverCtx.toLocaleString()}-token context (from the server)`);
-  else if (hint) facts.push(`${hint.contextSize.toLocaleString()}-token context (${hint.family})`);
+  else if (hint?.contextSize) facts.push(`${hint.contextSize.toLocaleString()}-token context (${known})`);
   if (serverVision !== undefined) facts.push(serverVision ? 'reads images (from the server)' : "doesn't read images (from the server)");
-  else if (hint?.vision !== undefined) facts.push(hint.vision ? `reads images (${hint.family})` : `doesn't read images (${hint.family})`);
+  else if (hint?.vision !== undefined) facts.push(hint.vision ? `reads images (${known})` : `doesn't read images (${known})`);
+  if (thinking) facts.push(`${thinking === 'toggle' ? 'can think before answering' : 'thinks before answering'} (${serverThinking ? 'from the server' : known})`);
 
-  let imagesHelp = 'Gemma 3 at 4B and larger reads images. Turn off for text-only models.';
-  if (serverVision !== undefined) imagesHelp = `The server says ${modelName || 'this model'} ${serverVision ? 'reads images' : "can't read images"}.`;
-  else if (hint?.vision !== undefined) imagesHelp = `${hint.family} ${hint.vision ? 'reads images' : "doesn't read images"}.`;
-  const imagesConflict = m.vision && (serverVision === false || (serverVision === undefined && hint?.vision === false));
+  const imagesHelp =
+    modelVision === undefined
+      ? "The server doesn't say whether this model reads images. If it refuses one, Open Rock leaves images out and stops offering them."
+      : `${model} reads images (${serverVision ? 'from the server' : known}).`;
+  const thinkingHelp =
+    protocol === 'ollama'
+      ? 'Ollama returns the thinking apart from the reply. Off answers straight away.'
+      : `Sent as chat_template_kwargs.enable_thinking, which Qwen3's chat template and others like it read. "Model's default" sends nothing.`;
 
   const ctxHelp =
     protocol === 'ollama'
@@ -773,7 +798,7 @@ function DedicatedModelSettingsView({
           </div>
           {overServer && (
             <p className="field-error">
-              <CircleAlert size={13} aria-hidden="true" /> The server reports {serverCtx!.toLocaleString()} tokens. Requests beyond that will fail.
+              <CircleAlert size={13} aria-hidden="true" /> The server reports {serverCtx!.toLocaleString()} tokens, so Open Rock uses that.
             </p>
           )}
         </Field>
@@ -814,18 +839,69 @@ function DedicatedModelSettingsView({
             ]}
             onChange={(v) => set({ contextStrategy: v })}
           />
-          <NumberField label="Characters per token" value={m.charsPerToken} nullable={false} onChange={(v) => set({ charsPerToken: v ?? 3.6 })} min={1} max={10} step={0.1} help="For estimating. English averages about 3.6–4 with Gemma." />
-          {m.vision && <NumberField label="Tokens per image" value={m.imageTokens} nullable={false} onChange={(v) => set({ imageTokens: v ?? 256 })} min={0} help="Gemma 3 encodes each image as 256 tokens." />}
+          <NumberField label="Characters per token" value={m.charsPerToken} nullable={false} onChange={(v) => set({ charsPerToken: v ?? 3.6 })} min={1} max={10} step={0.1} help="For estimating until the server reports real counts. English averages about 3.5–4." />
+          {sendsImages && (
+            <NumberField
+              label="Tokens per image"
+              value={m.imageTokens}
+              nullable={false}
+              onChange={(v) => set({ imageTokens: v ?? 256 })}
+              min={0}
+              help={hint?.imageTokens ? `${hint.family} encodes each image as ${hint.imageTokens} tokens.` : 'For estimating. Varies by model and image size.'}
+            />
+          )}
         </div>
       </Section>
 
+      {thinking && (
+        <Section title="Thinking" description="The model's thinking shows above each reply, folded away.">
+          {thinking === 'toggle' &&
+            (protocol === 'ollama' ? (
+              <Toggle label="Thinking" checked={m.thinking !== 'off'} onChange={(v) => set({ thinking: v ? 'on' : 'off' })} help={thinkingHelp} />
+            ) : (
+              <Select
+                label="Thinking"
+                value={m.thinking}
+                options={[
+                  { value: 'default', label: "Model's default" },
+                  { value: 'on', label: 'On' },
+                  { value: 'off', label: 'Off' },
+                ]}
+                onChange={(v) => set({ thinking: v as ThinkingChoice })}
+                help={thinkingHelp}
+              />
+            ))}
+          {thinking === 'effort' && (
+            <Select
+              label="Reasoning effort"
+              value={m.reasoningEffort ?? ''}
+              options={[{ value: '', label: "Model's default" }, ...(['low', 'medium', 'high'] as const).map((e) => ({ value: e, label: EFFORT_LABELS[e] }))]}
+              onChange={(v) => set({ reasoningEffort: (v || null) as LocalEffort | null })}
+              help={`${model} always reasons; this sets how much. Sent as ${protocol === 'ollama' ? 'think' : 'reasoning_effort'}.`}
+            />
+          )}
+          {thinking === 'always' && <p className="small muted">{model} always thinks before answering, so there's nothing to set.</p>}
+        </Section>
+      )}
+
       <Section
         title="Sampling"
-        description="Leave blank to use the server's default."
+        description="Leave blank to use the model's defaults, as the server sets them."
         aside={
-          <button className="btn btn-quiet" onClick={() => set({ temperature: 1, topK: 64, topP: 0.95, minP: 0 })}>
-            Use Gemma 3's recommended values
-          </button>
+          (hint?.sampling || hasSampling) && (
+            <div className="set-head-actions">
+              {hint?.sampling && (
+                <button className="btn btn-quiet" onClick={() => set(hint.sampling!)}>
+                  Use {hint.family}'s recommended values
+                </button>
+              )}
+              {hasSampling && (
+                <button className="btn btn-quiet" onClick={() => set(MODEL_DEFAULT_SAMPLING)}>
+                  Use the model's defaults
+                </button>
+              )}
+            </div>
+          )
         }
       >
         <div className="grid-4">
@@ -838,7 +914,7 @@ function DedicatedModelSettingsView({
           <NumberField label="Frequency penalty" value={m.frequencyPenalty} onChange={(v) => set({ frequencyPenalty: v })} min={-2} max={2} step={0.1} />
           <NumberField label="Seed" value={m.seed} onChange={(v) => set({ seed: v === null ? null : Math.round(v) })} min={0} help="Same seed, same reply." />
         </div>
-        <TagInput label="Stop sequences" values={m.stop} onChange={(v) => set({ stop: v })} placeholder="e.g. <end_of_turn>" />
+        <TagInput label="Stop sequences" values={m.stop} onChange={(v) => set({ stop: v })} />
       </Section>
 
       <Section title="Behavior">
@@ -851,7 +927,7 @@ function DedicatedModelSettingsView({
               { value: 'merge', label: 'At the start of the first message' },
             ]}
             onChange={(v) => set({ systemPromptMode: v })}
-            help="Gemma has no system role of its own; most servers fold it into the first turn. Pick the second option if yours rejects system messages."
+            help="Pick the second option if the server rejects system messages. Models without a system role of their own, such as Gemma, usually have it folded into the first turn by their chat template."
           />
           <NumberField label="Timeout" value={m.timeoutSec} nullable={false} onChange={(v) => set({ timeoutSec: v ?? 300 })} min={10} max={3600} suffix="seconds" help="How long to wait for the server to start or continue replying." />
           {protocol !== 'openai' && (
@@ -883,7 +959,7 @@ function DedicatedModelSettingsView({
           rows={3}
           value={m.extraBody}
           onChange={(v) => set({ extraBody: v })}
-          placeholder='{"chat_template_kwargs": {"enable_thinking": false}}'
+          placeholder={protocol === 'ollama' ? '{"options": {"repeat_last_n": 128}}' : '{"key": "value"}'}
           help={
             extraError ? (
               <span className="error-text">{extraError}</span>
@@ -897,13 +973,14 @@ function DedicatedModelSettingsView({
       </Section>
 
       <Section title="Files">
-        <Toggle label="Images" checked={m.vision} onChange={(v) => set({ vision: v })} help={imagesHelp} />
-        {imagesConflict && (
-          <p className="field-error">
-            <CircleAlert size={13} aria-hidden="true" /> Images sent to this model will fail or be ignored. Turn this off.
+        {modelVision === false ? (
+          <p className="small muted">
+            {model} doesn't read images ({serverVision === false ? 'from the server' : known}), so chats don't offer them.
           </p>
+        ) : (
+          <Toggle label="Images" checked={m.vision} onChange={(v) => set({ vision: v })} help={imagesHelp} />
         )}
-        {m.vision && <NumberField label="Images per request" value={m.maxImages} nullable={false} onChange={(v) => set({ maxImages: v ?? 8 })} min={1} max={64} help="Older images are left out first." />}
+        {sendsImages && <NumberField label="Images per request" value={m.maxImages} nullable={false} onChange={(v) => set({ maxImages: v ?? 8 })} min={1} max={64} help="Older images are left out first." />}
         <Toggle label="Read documents as text" checked={m.documentsAsText} onChange={(v) => set({ documentsAsText: v })} help="PDF, Word, Excel and PowerPoint files are converted to text for the model." />
       </Section>
     </>
@@ -1011,7 +1088,7 @@ function ServerCard({
           autoFocus={autoFocus}
           value={server.host}
           onChange={(v) => onChange({ host: v })}
-          placeholder="203.0.113.10 or gemma.example.com"
+          placeholder="203.0.113.10 or llm.example.com"
           help={server.host.trim() && !addr ? <span className="error-text">Enter a hostname or IP address, without a path.</span> : 'Hostname or IP address.'}
         />
         <NumberField
@@ -1038,7 +1115,7 @@ function ServerCard({
         help="Stays on the Open Rock server and isn't shown again here."
       />
       <div className="grid-2">
-        <TextField label="Name" value={server.name} onChange={(v) => onChange({ name: v })} placeholder={addr?.host ?? 'Gemma'} help="Shown in the sidebar and the server menu." />
+        <TextField label="Name" value={server.name} onChange={(v) => onChange({ name: v })} placeholder={addr?.host ?? 'New server'} help="Shown in the sidebar and the server menu." />
         <Select label="Model" value={server.model} options={modelOptions} onChange={(v) => onChange({ model: v })} help="The name sent with each request." />
         <Select
           label="Send the token as"

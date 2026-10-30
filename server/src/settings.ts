@@ -32,10 +32,12 @@ const API_STYLES: DedicatedApiStyle[] = ['auto', 'openai', 'ollama'];
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const THINKING_CHOICES: ThinkingChoice[] = ['default', 'on', 'off'];
 /** Model settings that may be left blank (null) to use the server's own default. */
-const NULLABLE_MODEL_KEYS = new Set(['temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'presencePenalty', 'frequencyPenalty', 'seed', 'numGpu', 'numThread']);
+const NULLABLE_MODEL_KEYS = new Set(['temperature', 'topP', 'topK', 'minP', 'repetitionPenalty', 'presencePenalty', 'frequencyPenalty', 'seed', 'numGpu', 'numThread', 'reasoningEffort']);
 const MODEL_CHOICES: Partial<Record<keyof DedicatedModelSettings, string[]>> = {
   contextStrategy: ['truncate', 'error', 'none'],
   systemPromptMode: ['native', 'merge'],
+  thinking: THINKING_CHOICES,
+  reasoningEffort: ['low', 'medium', 'high'],
 };
 
 type Listener = (s: Settings) => void;
@@ -74,7 +76,7 @@ function modelSettingsFrom(raw: Record<string, unknown>, base: DedicatedModelSet
     out[key] = fallback;
     if (v === undefined) continue;
     const choices = MODEL_CHOICES[key as keyof DedicatedModelSettings];
-    if (choices) out[key] = choices.includes(v as string) ? v : fallback;
+    if (choices) out[key] = choices.includes(v as string) || (v === null && NULLABLE_MODEL_KEYS.has(key)) ? v : fallback;
     else if (NULLABLE_MODEL_KEYS.has(key)) out[key] = v === null || isNumber(v) ? v : fallback;
     else if (Array.isArray(fallback)) out[key] = isStringList(v) ? v : fallback;
     else out[key] = typeof v === typeof fallback && (typeof v !== 'number' || Number.isFinite(v)) ? v : fallback;
@@ -170,7 +172,7 @@ export function fromStored(stored: unknown): Settings {
           {
             ...shared,
             id: 'env',
-            name: text(legacy.displayName) || 'Gemma',
+            name: text(legacy.displayName) || config.dedicated.host,
             host: config.dedicated.host,
             port: isPort(legacy.port) ? legacy.port : 443,
             apiKey: typeof legacy.apiKey === 'string' ? legacy.apiKey : '',

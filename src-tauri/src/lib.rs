@@ -3,7 +3,7 @@
 //! The UI is the same React app as the website. On launch we start the bundled Open Rock server
 //! (a sidecar binary built from ../server) on a free localhost port with a random access token,
 //! and hand both to the UI through the `backend_info` command. The server holds the Bedrock API
-//! key and talks to Bedrock and the dedicated Gemma server; the webview never sees those secrets.
+//! key and talks to Bedrock and the dedicated servers; the webview never sees those secrets.
 
 use std::net::TcpListener;
 use std::sync::Mutex;

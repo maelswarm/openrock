@@ -1,4 +1,4 @@
-// Local stand-ins for Bedrock and the Gemma server, used by the end-to-end tests.
+// Local stand-ins for Bedrock and a dedicated server (Gemma unless told otherwise), used by the end-to-end tests.
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
@@ -40,6 +40,14 @@ export interface GemmaMock {
   expect: 'bearer' | 'x-api-key' | 'raw' | 'basic';
   /** After the token check, answer like Ollama does when the Host header isn't localhost: bare 403. */
   hostCheck: boolean;
+  /** The model the server lists, when not Gemma 3. */
+  model?: string;
+  /** What Ollama's /api/show says the model can do. */
+  capabilities: string[];
+  /** The streamed reply, piece by piece, when not the usual greeting. */
+  reply?: string[];
+  /** Refuse images the way vLLM does for a text-only model. */
+  textOnly: boolean;
   requests: { path: string; body: any; auth: string | undefined; apiKey: string | undefined }[];
   close(): Promise<void>;
 }
@@ -51,7 +59,7 @@ export type MockTls = 'othername' | 'expired' | 'weak' | 'ed25519' | 'privateca'
 
 /** Pass `tls: true` to serve HTTPS with a self-signed certificate, or name another kind of certificate. */
 export async function startGemmaMock(opts: { tls?: boolean | MockTls } = {}): Promise<GemmaMock> {
-  const mock: GemmaMock = { url: '', port: 0, style: 'openai', expect: 'bearer', hostCheck: false, requests: [], close: async () => undefined };
+  const mock: GemmaMock = { url: '', port: 0, style: 'openai', expect: 'bearer', hostCheck: false, capabilities: ['completion', 'vision'], textOnly: false, requests: [], close: async () => undefined };
   const handler: http.RequestListener = async (req, res) => {
     const raw = await readBody(req);
     const body = raw ? JSON.parse(raw) : null;
@@ -81,17 +89,22 @@ export async function startGemmaMock(opts: { tls?: boolean | MockTls } = {}): Pr
     if (mock.style === 'openai') {
       if (path === '/v1/models') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ object: 'list', data: [{ id: 'google/gemma-3-27b-it', object: 'model', max_model_len: 32768 }] }));
+        res.end(JSON.stringify({ object: 'list', data: [{ id: mock.model ?? 'google/gemma-3-27b-it', object: 'model', max_model_len: 32768 }] }));
         return;
       }
       if (path === '/v1/chat/completions') {
+        if (mock.textOnly && body.messages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'))) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ object: 'error', message: 'At most 0 image(s) may be provided in one request.', type: 'BadRequestError', code: 400 }));
+          return;
+        }
         if (!body.stream) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Plain reply.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 42, completion_tokens: 3 } }));
           return;
         }
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-        for (const piece of RICH ? RICH_TEXT : ['Hello', ' from', ' Gemma']) {
+        for (const piece of mock.reply ?? (RICH ? RICH_TEXT : ['Hello', ' from', ' Gemma'])) {
           res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: piece }, finish_reason: null }] })}\n\n`);
         }
         res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
@@ -102,12 +115,12 @@ export async function startGemmaMock(opts: { tls?: boolean | MockTls } = {}): Pr
     } else {
       if (path === '/api/tags') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ models: [{ name: 'gemma3:27b' }] }));
+        res.end(JSON.stringify({ models: [{ name: mock.model ?? 'gemma3:27b' }] }));
         return;
       }
       if (path === '/api/show') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ model_info: { 'gemma3.context_length': 131072 }, capabilities: ['completion', 'vision'] }));
+        res.end(JSON.stringify({ model_info: { 'gemma3.context_length': 131072 }, capabilities: mock.capabilities }));
         return;
       }
       if (path === '/api/chat') {

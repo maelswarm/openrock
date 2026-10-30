@@ -3,7 +3,7 @@
 //   node scripts/build-sidecar.mjs            # for this machine
 //   node scripts/build-sidecar.mjs <triple>   # e.g. x86_64-pc-windows-msvc
 //
-// If .env names a Gemma server (OPEN_ROCK_DEDICATED_HOST and its token), it's baked into the binary and starts the
+// If .env names a dedicated server (OPEN_ROCK_DEDICATED_HOST and its token), it's baked into the binary and starts the
 // Dedicated server list on first run. Servers are otherwise added in Settings → Dedicated.
 
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -78,7 +78,7 @@ for (const key of ['OPEN_ROCK_DEDICATED_HOST', 'OPEN_ROCK_DEDICATED_URL', 'OPEN_
   if (env[key]) embedded[key] = env[key];
 }
 if (!embedded.OPEN_ROCK_DEDICATED_HOST && !embedded.OPEN_ROCK_DEDICATED_URL) {
-  console.log('[sidecar] No Gemma server in .env; add servers in Settings → Dedicated.');
+  console.log('[sidecar] No dedicated server in .env; add servers in Settings → Dedicated.');
 }
 
 const args = [

@@ -1,8 +1,8 @@
 {
   "name": "open-rock",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
-  "description": "Chat with any AWS Bedrock model or your own dedicated Gemma server, on the web or desktop.",
+  "description": "Chat with any AWS Bedrock model or the models on your own servers (Ollama, vLLM, llama.cpp), on the web or desktop.",
   "type": "module",
   "workspaces": [
     "shared",

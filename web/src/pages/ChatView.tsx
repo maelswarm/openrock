@@ -171,7 +171,7 @@ function EmptyState({ hasKey }: { hasKey: boolean }) {
     return (
       <div className="empty">
         <h1>Add a dedicated server</h1>
-        <p>Enter your Gemma server's hostname or IP address, its HTTPS port and its token. You can add as many servers as you like and pick one per chat.</p>
+        <p>Enter the hostname or IP address of a server running Ollama, vLLM, llama.cpp or another OpenAI-compatible server, its HTTPS port and its token. You can add as many servers as you like and pick one per chat.</p>
         <a className="btn btn-primary" href="#/settings/dedicated">
           Add a server
         </a>

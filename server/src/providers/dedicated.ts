@@ -2,10 +2,13 @@ import http from 'node:http';
 import https from 'node:https';
 import {
   estimateTokens,
+  localReadsImages,
+  localThinking,
   serverUrl,
   type ContextReport,
   type DedicatedServer,
   type DedicatedStatus,
+  type LocalThinking,
   type TokenUsage,
 } from '@open-rock/shared';
 import { config } from '../config.js';
@@ -16,7 +19,7 @@ import { ProviderError, type ChatRequest, type LoadedAttachment, type NeutralMes
 type Style = 'openai' | 'ollama';
 
 // ---------- Transport ----------
-// node:https instead of fetch so any certificate the Gemma server presents is accepted, for these requests only
+// node:https instead of fetch so any certificate a dedicated server presents is accepted, for these requests only
 // (Bedrock and everything else keep normal certificate checks): self-signed, expired, issued for another name or by a
 // private CA, weak keys and old signature hashes. Traffic is encrypted; the certificate isn't used to verify the
 // server's identity. The same code runs under Node (website) and Bun (desktop sidecar), whose TLS libraries take
@@ -275,7 +278,7 @@ function describeNetworkError(srv: DedicatedServer, err: unknown): string {
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return `Couldn't resolve ${srv.host}.`;
   if (code === 'ECONNRESET') return `The connection to ${where} was reset.`;
   if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') return `${srv.host} isn't reachable from this machine.`;
-  return `Couldn't reach the Gemma server at ${where}: ${e?.cause?.message ?? msg}`;
+  return `Couldn't reach ${where}: ${e?.cause?.message ?? msg}`;
 }
 
 // ---------- Detection & status ----------
@@ -284,6 +287,11 @@ function describeNetworkError(srv: DedicatedServer, err: unknown): string {
 const detected = new Map<string, { style: Style; at: number }>();
 /** Models each server listed at its last check, per address. */
 const listedModels = new Map<string, string[]>();
+/** What each server said about a model at its last check, per address and model. */
+const reportedFacts = new Map<string, { contextSize?: number; vision?: boolean; thinking?: boolean }>();
+/** Models that refused an image, per address and model. */
+const refusedImages = new Set<string>();
+const factsKey = (srv: DedicatedServer, model: string) => `${root(srv)} ${model}`;
 
 interface ProbeResult {
   style: Style;
@@ -358,7 +366,7 @@ async function probe(srv: DedicatedServer): Promise<ProbeResult> {
   if (!dedicatedToken(srv)) {
     message = `${where} needs a token (HTTP ${codes}). Paste it into this server's Token field in Settings → Dedicated.`;
   } else if (basic) {
-    message = `${where} asks for a username and password (HTTP Basic auth), not an API token. Check the proxy in front of the Gemma server; its answers are listed below.`;
+    message = `${where} asks for a username and password (HTTP Basic auth), not an API token. Check the proxy in front of the server; its answers are listed below.`;
   } else if (styles.length > 1) {
     message = `${where} refused the token (HTTP ${codes}) in every format Open Rock tried: ${styles.map((s) => AUTH_LABEL[s]).join(', ')}. Check the token, and compare with the server's answers below.`;
   } else {
@@ -405,6 +413,7 @@ export async function dedicatedStatus(srv: DedicatedServer): Promise<DedicatedSt
     const model = srv.model || models[0] || '';
     let contextSize: number | undefined;
     let vision: boolean | undefined;
+    let thinking: boolean | undefined;
     if (style === 'openai') {
       const card = ((raw as { data?: Record<string, unknown>[] })?.data ?? []).find((d) => d.id === model);
       if (card && typeof card.max_model_len === 'number') contextSize = card.max_model_len;
@@ -426,12 +435,17 @@ export async function dedicatedStatus(srv: DedicatedServer): Promise<DedicatedSt
         for (const [k, v] of Object.entries(b?.model_info ?? {})) {
           if (k.endsWith('.context_length') && typeof v === 'number') contextSize = v;
         }
-        if (Array.isArray(b?.capabilities)) vision = b.capabilities.includes('vision');
+        if (Array.isArray(b?.capabilities)) {
+          vision = b.capabilities.includes('vision');
+          thinking = b.capabilities.includes('thinking');
+        }
       } catch {
         // optional
       }
     }
     listedModels.set(endpoint, models);
+    reportedFacts.set(factsKey(srv, model), { contextSize, vision, thinking });
+    if (vision === undefined && refusedImages.has(factsKey(srv, model))) vision = false;
     return {
       ok: true,
       message: `Connected to ${endpoint}`,
@@ -440,6 +454,7 @@ export async function dedicatedStatus(srv: DedicatedServer): Promise<DedicatedSt
       models,
       contextSize,
       vision,
+      thinking,
       latencyMs,
       authHeader: authUsed,
       details,
@@ -461,6 +476,29 @@ export function cachedDedicatedModel(srv: DedicatedServer): string {
   return listedModels.get(root(srv))?.[0] ?? '';
 }
 
+export interface DedicatedModelFacts {
+  model: string;
+  /** Whether the server has been checked for this model since Open Rock started. */
+  checked: boolean;
+  /** The context the server reports for the model; requests are kept within it. */
+  contextSize?: number;
+  images: boolean;
+  thinking: LocalThinking | null;
+}
+
+/** What a server's model can do: what the server reported at its last check, else what its name suggests. */
+export function dedicatedModelFacts(srv: DedicatedServer, model = cachedDedicatedModel(srv)): DedicatedModelFacts {
+  const key = factsKey(srv, model);
+  const reported = reportedFacts.get(key);
+  return {
+    model,
+    checked: !!reported,
+    contextSize: reported?.contextSize,
+    images: localReadsImages(srv, model, reported?.vision ?? (refusedImages.has(key) ? false : undefined)),
+    thinking: localThinking(model, reported?.thinking),
+  };
+}
+
 // ---------- Context fitting ----------
 
 export interface Prepared {
@@ -469,9 +507,9 @@ export interface Prepared {
   images: LoadedAttachment[];
 }
 
-async function prepare(history: NeutralMessage[], srv: DedicatedServer, notices: Set<string>): Promise<Prepared[]> {
+async function prepare(history: NeutralMessage[], srv: DedicatedServer, facts: DedicatedModelFacts, notices: Set<string>): Promise<Prepared[]> {
   const msgs = normalizeHistory(history);
-  let imagesLeft = srv.vision ? Math.max(0, srv.maxImages) : 0;
+  let imagesLeft = facts.images ? Math.max(0, srv.maxImages) : 0;
   const out: Prepared[] = [];
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
@@ -479,9 +517,9 @@ async function prepare(history: NeutralMessage[], srv: DedicatedServer, notices:
     const images: LoadedAttachment[] = [];
     for (const a of m.attachments) {
       if (a.kind === 'image') {
-        if (!srv.vision) {
-          notices.add('Vision is off for the dedicated server, so images were left out.');
-          parts.push(omittedNote(a.name, 'image input is turned off'));
+        if (!facts.images) {
+          notices.add(srv.vision ? `${facts.model || 'This model'} doesn't read images, so they were left out.` : 'Images are turned off for this server, so they were left out.');
+          parts.push(omittedNote(a.name, srv.vision ? "the model doesn't read images" : 'image input is turned off'));
         } else if (imagesLeft <= 0) {
           parts.push(omittedNote(a.name, `only the ${srv.maxImages} most recent images are sent`));
         } else {
@@ -489,7 +527,7 @@ async function prepare(history: NeutralMessage[], srv: DedicatedServer, notices:
           images.push(a);
         }
       } else if (a.kind === 'video') {
-        notices.add("Gemma can't watch video, so it was left out.");
+        notices.add("Dedicated servers aren't sent video, so it was left out.");
         parts.push(omittedNote(a.name, 'video is not supported'));
       } else if (a.kind === 'document' && !srv.documentsAsText) {
         parts.push(omittedNote(a.name, 'document reading is turned off'));
@@ -584,7 +622,23 @@ async function b64(a: LoadedAttachment): Promise<string> {
   return Buffer.from(await a.bytes()).toString('base64');
 }
 
-async function openaiBody(model: string, msgs: Prepared[], system: string, srv: DedicatedServer) {
+/**
+ * Thinking settings for the request, only for models that think: other models (and older servers) may reject them.
+ * Ollama is always asked to think when the model does, which also makes it return the thinking apart from the reply.
+ */
+function thinkingFields(style: Style, srv: DedicatedServer, kind: LocalThinking | null): Record<string, unknown> {
+  if (!kind) return {};
+  if (style === 'ollama') {
+    if (kind === 'effort') return { think: srv.reasoningEffort ?? true };
+    return { think: kind === 'always' || srv.thinking !== 'off' };
+  }
+  if (kind === 'effort') return compact({ reasoning_effort: srv.reasoningEffort });
+  // Read by the chat templates of Qwen3 and other models that can think or not, in vLLM, llama.cpp and SGLang.
+  if (kind === 'toggle' && srv.thinking !== 'default') return { chat_template_kwargs: { enable_thinking: srv.thinking === 'on' } };
+  return {};
+}
+
+async function openaiBody(model: string, msgs: Prepared[], system: string, srv: DedicatedServer, thinking: LocalThinking | null) {
   const s = withSystem(msgs, system, srv);
   const messages: unknown[] = [];
   if (s.system) messages.push({ role: 'system', content: s.system });
@@ -616,6 +670,7 @@ async function openaiBody(model: string, msgs: Prepared[], system: string, srv: 
       stop: srv.stop,
       stream_options: srv.stream && srv.includeUsage ? { include_usage: true } : null,
     }),
+    ...thinkingFields('openai', srv, thinking),
     ...parseExtra(srv),
   };
 }
@@ -628,7 +683,7 @@ export function keepAliveValue(v: string): string | number | null {
   return t;
 }
 
-async function ollamaBody(model: string, msgs: Prepared[], system: string, srv: DedicatedServer) {
+async function ollamaBody(model: string, msgs: Prepared[], system: string, srv: DedicatedServer, thinking: LocalThinking | null) {
   const s = withSystem(msgs, system, srv);
   const messages: unknown[] = [];
   if (s.system) messages.push({ role: 'system', content: s.system });
@@ -647,6 +702,7 @@ async function ollamaBody(model: string, msgs: Prepared[], system: string, srv: 
       stream: srv.stream,
       keep_alive: keepAliveValue(srv.keepAlive),
     }),
+    ...thinkingFields('ollama', srv, thinking),
     options: {
       ...compact({
         num_ctx: srv.contextSize,
@@ -714,7 +770,73 @@ async function* lines(body: AsyncIterable<Uint8Array>, kick: () => void): AsyncG
   if (buf.trim()) yield buf;
 }
 
-async function errorFromResponse(res: DResponse): Promise<ProviderError> {
+const OPEN_THINK = '<think>';
+const CLOSE_THINK = '</think>';
+
+/** How many characters at the end of `text` could be the start of `tag`. */
+function partialTag(text: string, tag: string): number {
+  for (let n = Math.min(tag.length - 1, text.length); n > 0; n--) if (text.endsWith(tag.slice(0, n))) return n;
+  return 0;
+}
+
+/**
+ * Moves a reply's leading <think>…</think> into its thinking, for servers that leave a model's thinking in the text
+ * (vLLM without a reasoning parser, llama.cpp with reasoning_format none, older Ollama).
+ */
+function thinkTags() {
+  let state: 'start' | 'think' | 'text' = 'start';
+  let buf = '';
+  let trimNext = false;
+  function* push(chunk: string): Generator<ProviderEvent> {
+    if (state === 'text') {
+      const text = trimNext ? chunk.replace(/^\s+/, '') : chunk;
+      if (text) {
+        trimNext = false;
+        yield { type: 'delta', text };
+      }
+      return;
+    }
+    buf += chunk;
+    if (state === 'start') {
+      const t = buf.trimStart();
+      if (!t || OPEN_THINK.startsWith(t)) return;
+      if (!t.startsWith(OPEN_THINK)) {
+        state = 'text';
+        const text = buf;
+        buf = '';
+        yield { type: 'delta', text };
+        return;
+      }
+      state = 'think';
+      buf = t.slice(OPEN_THINK.length);
+    }
+    const end = buf.indexOf(CLOSE_THINK);
+    if (end >= 0) {
+      const thought = buf.slice(0, end);
+      const rest = buf.slice(end + CLOSE_THINK.length);
+      buf = '';
+      state = 'text';
+      trimNext = true;
+      if (thought) yield { type: 'reasoning', text: thought };
+      yield* push(rest);
+      return;
+    }
+    const keep = partialTag(buf, CLOSE_THINK);
+    const thought = buf.slice(0, buf.length - keep);
+    buf = buf.slice(buf.length - keep);
+    if (thought) yield { type: 'reasoning', text: thought };
+  }
+  function* flush(): Generator<ProviderEvent> {
+    if (buf) yield { type: state === 'think' ? 'reasoning' : 'delta', text: buf };
+    buf = '';
+  }
+  return { push, flush };
+}
+
+/** Errors that mean the model can't take images (vLLM, llama.cpp without its projector, LM Studio, Ollama). */
+const IMAGES_REFUSED = /not a multi-?modal|(does not|doesn't|do not) support (multi-?modal|image|vision)|image input is not supported|at most 0 image|missing data required for image|mmproj/i;
+
+async function errorFromResponse(res: DResponse, srv: DedicatedServer): Promise<ProviderError> {
   const text = await res.text().catch(() => '');
   let msg = text;
   try {
@@ -723,83 +845,109 @@ async function errorFromResponse(res: DResponse): Promise<ProviderError> {
   } catch {
     // plain text
   }
-  if (res.status === 403 && !text.trim()) return new ProviderError(ollamaHostMessage('the Gemma server'), 403);
+  if (res.status === 403 && !text.trim()) return new ProviderError(ollamaHostMessage(root(srv)), 403);
   msg = (msg || `HTTP ${res.status}`).slice(0, 600);
   if (res.status === 401 || res.status === 403) {
-    return new ProviderError(`The Gemma server refused the token (HTTP ${res.status}): ${msg} Check the token in Settings → Dedicated, then press Check again.`, 401);
+    return new ProviderError(`The server refused the token (HTTP ${res.status}): ${msg} Check the token in Settings → Dedicated, then press Check again.`, 401);
   }
   if (/context length|maximum context|too many tokens|exceeds|max_model_len/i.test(msg)) {
     return new ProviderError(`${msg} Lower the context size or max output tokens in Settings → Dedicated so they match the server.`, 400);
   }
   if (res.status === 404 && /model/i.test(msg)) return new ProviderError(`${msg} Pick the model name the server serves in Settings → Dedicated.`, 404);
-  return new ProviderError(`Gemma server error (${res.status}): ${msg}`, res.status >= 500 ? 502 : 400, res.status === 429);
+  return new ProviderError(`The server answered with an error (HTTP ${res.status}): ${msg}`, res.status >= 500 ? 502 : 400, res.status === 429);
 }
 
 /** Chat with one server, using that server's own context, sampling and file settings. */
 export async function* dedicatedChat(srv: DedicatedServer, req: ChatRequest): AsyncGenerator<ProviderEvent> {
   const style = await resolveStyle(srv);
   let model = cachedDedicatedModel(srv);
-  if (!model) {
+  if (!model || !dedicatedModelFacts(srv, model).checked) {
+    // What the model can do decides what's sent, so ask the server once.
     const st = await dedicatedStatus(srv);
-    if (!st.ok) throw new ProviderError(st.message, 503);
-    model = st.models[0] ?? '';
-    if (!model && style === 'ollama') throw new ProviderError('The Gemma server reports no models.', 503);
+    if (!model) {
+      if (!st.ok) throw new ProviderError(st.message, 503);
+      model = st.models[0] ?? '';
+      if (!model && style === 'ollama') throw new ProviderError('The server lists no models.', 503);
+    }
   }
+  const facts = dedicatedModelFacts(srv, model);
+  // The server's own context limit wins over a larger setting.
+  const fit = facts.contextSize && facts.contextSize < srv.contextSize ? { ...srv, contextSize: facts.contextSize } : srv;
 
   const notices = new Set<string>();
-  const prepared = await prepare(req.messages, srv, notices);
+  const prepared = await prepare(req.messages, srv, facts, notices);
   for (const n of notices) yield { type: 'notice', message: n };
-  const { messages, report } = fitContext(prepared, req.system, srv);
+  const fitted = fitContext(prepared, req.system, fit);
+  const report = fitted.report;
+  let messages = fitted.messages;
   if (report.droppedMessages > 0) {
-    yield { type: 'notice', message: `Left out the ${report.droppedMessages} oldest message${report.droppedMessages === 1 ? '' : 's'} to fit the ${srv.contextSize.toLocaleString()}-token context.` };
+    yield { type: 'notice', message: `Left out the ${report.droppedMessages} oldest message${report.droppedMessages === 1 ? '' : 's'} to fit the ${fit.contextSize.toLocaleString()}-token context.` };
   }
   yield { type: 'context', context: report };
 
   const url = style === 'openai' ? `${openaiBase(srv)}/chat/completions` : `${root(srv)}/api/chat`;
-  const body = style === 'openai' ? await openaiBody(model, messages, req.system, srv) : await ollamaBody(model, messages, req.system, srv);
+  const bodyFor = (msgs: Prepared[]) => (style === 'openai' ? openaiBody(model, msgs, req.system, fit, facts.thinking) : ollamaBody(model, msgs, req.system, fit, facts.thinking));
   const t = idleTimeout(req.signal, Math.max(10, srv.timeoutSec) * 1000);
   const started = Date.now();
   let res: DResponse;
-  const send = (style: AuthStyle) => drequest(url, { method: 'POST', headers: headers(srv, true, style), body: JSON.stringify(body), signal: t.signal });
-  try {
+  const post = async (body: unknown) => {
+    const send = (style: AuthStyle) => drequest(url, { method: 'POST', headers: headers(srv, true, style), body: JSON.stringify(body), signal: t.signal });
     const firstStyle = authStyleFor(srv);
-    res = await send(firstStyle);
+    let r = await send(firstStyle);
     // Not authorized with the remembered header style: find the one the server takes, then retry once.
-    if ((res.status === 401 || res.status === 403) && srv.authHeader === 'auto' && dedicatedToken(srv)) {
-      await res.text().catch(() => '');
+    if ((r.status === 401 || r.status === 403) && srv.authHeader === 'auto' && dedicatedToken(srv)) {
+      await r.text().catch(() => '');
       detectedAuth.delete(authKey(srv));
       const st = await dedicatedStatus(srv);
       const nextStyle = authStyleFor(srv);
-      if (st.ok && nextStyle !== firstStyle) res = await send(nextStyle);
+      if (st.ok && nextStyle !== firstStyle) r = await send(nextStyle);
       else if (!st.ok) throw new ProviderError(st.message, 401, false, st.details);
-      else res = await send(firstStyle);
+      else r = await send(firstStyle);
+    }
+    return r;
+  };
+  try {
+    res = await post(await bodyFor(messages));
+    if (!res.ok && res.status !== 401 && res.status !== 403 && messages.some((m) => m.images.length)) {
+      // A model the server didn't describe turned out not to read images: send the text alone, and stop offering images.
+      const err = await errorFromResponse(res, srv);
+      if (!IMAGES_REFUSED.test(err.message)) {
+        if (res.status === 404 && srv.apiStyle === 'auto') detected.delete(root(srv));
+        throw err;
+      }
+      refusedImages.add(factsKey(srv, model));
+      yield { type: 'notice', message: `${model || 'This model'} doesn't read images, so they were left out.` };
+      messages = messages.map((m) => (m.images.length ? { ...m, images: [], text: [...m.images.map((a) => omittedNote(a.name, "the model doesn't read images")), m.text].join('\n\n') } : m));
+      res = await post(await bodyFor(messages));
     }
   } catch (err) {
     t.done();
     if (req.signal.aborted) throw err;
     if (err instanceof ProviderError) throw err;
-    throw new ProviderError(t.timedOut() ? `The Gemma server didn't start replying within ${srv.timeoutSec}s.` : describeNetworkError(srv, err), 503);
+    throw new ProviderError(t.timedOut() ? `The server didn't start replying within ${srv.timeoutSec}s.` : describeNetworkError(srv, err), 503);
   }
   if (!res.ok) {
     t.done();
     if (res.status === 404 && srv.apiStyle === 'auto') detected.delete(root(srv));
-    throw await errorFromResponse(res);
+    throw await errorFromResponse(res, srv);
   }
 
   let usage: TokenUsage | null = null;
   let stop = 'end_turn';
+  const reply = thinkTags();
   try {
     if (!srv.stream) {
       const j = JSON.parse(await res.text()) as Record<string, any>;
       if (style === 'openai') {
         const msg = j.choices?.[0]?.message ?? {};
-        if (msg.reasoning_content) yield { type: 'reasoning', text: String(msg.reasoning_content) };
-        if (msg.content) yield { type: 'delta', text: String(msg.content) };
+        const reasoning = msg.reasoning_content ?? msg.reasoning;
+        if (reasoning) yield { type: 'reasoning', text: String(reasoning) };
+        if (msg.content) yield* reply.push(String(msg.content));
         stop = j.choices?.[0]?.finish_reason ?? stop;
         if (j.usage) usage = { inputTokens: j.usage.prompt_tokens ?? 0, outputTokens: j.usage.completion_tokens ?? 0 };
       } else {
         if (j.message?.thinking) yield { type: 'reasoning', text: String(j.message.thinking) };
-        if (j.message?.content) yield { type: 'delta', text: String(j.message.content) };
+        if (j.message?.content) yield* reply.push(String(j.message.content));
         stop = j.done_reason ?? stop;
         usage = { inputTokens: j.prompt_eval_count ?? 0, outputTokens: j.eval_count ?? 0 };
       }
@@ -814,12 +962,12 @@ export async function* dedicatedChat(srv: DedicatedServer, req: ChatRequest): As
         } catch {
           continue;
         }
-        if (j.error) throw new ProviderError(`Gemma server error: ${j.error.message ?? JSON.stringify(j.error)}`);
+        if (j.error) throw new ProviderError(`The server reported an error: ${j.error.message ?? JSON.stringify(j.error)}`);
         const choice = j.choices?.[0];
         const d = choice?.delta ?? {};
         const reasoning = d.reasoning_content ?? d.reasoning;
         if (reasoning) yield { type: 'reasoning', text: String(reasoning) };
-        if (d.content) yield { type: 'delta', text: String(d.content) };
+        if (d.content) yield* reply.push(String(d.content));
         if (choice?.finish_reason) stop = choice.finish_reason;
         if (j.usage) usage = { inputTokens: j.usage.prompt_tokens ?? 0, outputTokens: j.usage.completion_tokens ?? 0 };
       }
@@ -832,17 +980,18 @@ export async function* dedicatedChat(srv: DedicatedServer, req: ChatRequest): As
         } catch {
           continue;
         }
-        if (j.error) throw new ProviderError(`Gemma server error: ${j.error}`);
+        if (j.error) throw new ProviderError(`The server reported an error: ${j.error}`);
         if (j.message?.thinking) yield { type: 'reasoning', text: String(j.message.thinking) };
-        if (j.message?.content) yield { type: 'delta', text: String(j.message.content) };
+        if (j.message?.content) yield* reply.push(String(j.message.content));
         if (j.done) {
           stop = j.done_reason ?? stop;
           usage = { inputTokens: j.prompt_eval_count ?? 0, outputTokens: j.eval_count ?? 0 };
         }
       }
     }
+    yield* reply.flush();
   } catch (err) {
-    if (t.timedOut() && !req.signal.aborted) throw new ProviderError(`The Gemma server went quiet for ${srv.timeoutSec}s, so the reply was cut off.`, 504);
+    if (t.timedOut() && !req.signal.aborted) throw new ProviderError(`The server went quiet for ${srv.timeoutSec}s, so the reply was cut off.`, 504);
     throw err;
   } finally {
     t.done();

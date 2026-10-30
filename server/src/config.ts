@@ -64,7 +64,7 @@ function dedicatedHost(): string {
 }
 
 export const config = {
-  version: '0.1.0',
+  version: '0.1.1',
   host: env('OPEN_ROCK_HOST') ?? '127.0.0.1',
   port: envInt('OPEN_ROCK_PORT', 8787),
   dataDir: path.resolve(env('OPEN_ROCK_DATA_DIR') ?? path.join(os.homedir(), '.open-rock')),
@@ -84,7 +84,7 @@ export const config = {
       .filter(Boolean),
   ],
   /**
-   * An optional Gemma server named in .env. It starts the server list on first run, and a server at this host with no
+   * An optional dedicated server named in .env. It starts the server list on first run, and a server at this host with no
    * token of its own uses this token. The token never leaves the server.
    */
   dedicated: {

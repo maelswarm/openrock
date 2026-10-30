@@ -33,6 +33,8 @@ export interface ModelPrice {
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 /** For models where thinking is optional. "default" leaves it to the model: newer Claude models think, older ones don't. */
 export type ThinkingChoice = 'default' | 'on' | 'off';
+/** Reasoning effort levels local models take (gpt-oss). */
+export type LocalEffort = 'low' | 'medium' | 'high';
 
 /** How a Bedrock model replies. Numbers left null use the model's own default. Each model only gets what it supports. */
 export interface BedrockReplySettings {
@@ -63,7 +65,7 @@ export interface BedrockSettings {
   pricing: Record<string, ModelPrice>;
 }
 
-/** Which wire protocol the Gemma endpoint speaks. "auto" probes the server once and remembers. */
+/** Which wire protocol a dedicated server speaks. "auto" probes the server once and remembers. */
 export type DedicatedApiStyle = 'auto' | 'openai' | 'ollama';
 /** How the token is sent. "auto" tries Authorization: Bearer first, then the other common API-key headers. */
 export type DedicatedAuthHeader = 'auto' | 'bearer' | 'x-api-key' | 'api-key' | 'raw';
@@ -93,6 +95,11 @@ export interface DedicatedModelSettings {
   seed: number | null;
   stop: string[];
 
+  // Thinking, for models that think. Other models are sent nothing.
+  thinking: ThinkingChoice;
+  /** For models that always reason and take an effort level instead (gpt-oss). null = the model's default. */
+  reasoningEffort: LocalEffort | null;
+
   // Behaviour
   systemPromptMode: SystemPromptMode;
   stream: boolean;
@@ -103,13 +110,15 @@ export interface DedicatedModelSettings {
   extraBody: string;
 
   // Capabilities
+  /** Send images, when the model reads them. Models that don't are never sent images, whatever this says. */
   vision: boolean;
   maxImages: number;
   documentsAsText: boolean;
 }
 
 /**
- * One Gemma server and the model settings for it. Connections always use HTTPS and accept any certificate.
+ * One dedicated server (Ollama, vLLM, llama.cpp or another OpenAI-compatible server, running any model) and the model
+ * settings for it. Connections always use HTTPS and accept any certificate.
  * The token is never sent back to the browser.
  */
 export interface DedicatedServer extends DedicatedModelSettings {
@@ -118,7 +127,7 @@ export interface DedicatedServer extends DedicatedModelSettings {
   name: string;
   /** Hostname or IP address, without scheme or port. */
   host: string;
-  /** HTTPS port of the Gemma server (or the TLS proxy in front of it). */
+  /** HTTPS port of the server (or the TLS proxy in front of it). */
   port: number;
   /** Token (API key) for this server. Secret: returned to the client masked. */
   apiKey: string;
@@ -158,7 +167,7 @@ export const DEFAULT_REPLIES: BedrockReplySettings = {
   effort: null,
 };
 
-/** A new dedicated server's model settings: Gemma 3's recommended sampling and a context most servers can hold. */
+/** A new dedicated server's model settings: the model's own sampling (left to the server) and a context most servers can hold. */
 export const DEFAULT_DEDICATED_MODEL: DedicatedModelSettings = {
   timeoutSec: 300,
   contextSize: 8192,
@@ -167,15 +176,17 @@ export const DEFAULT_DEDICATED_MODEL: DedicatedModelSettings = {
   safetyMarginTokens: 128,
   charsPerToken: 3.6,
   imageTokens: 256,
-  temperature: 1.0,
-  topP: 0.95,
-  topK: 64,
+  temperature: null,
+  topP: null,
+  topK: null,
   minP: null,
   repetitionPenalty: null,
   presencePenalty: null,
   frequencyPenalty: null,
   seed: null,
   stop: [],
+  thinking: 'default',
+  reasoningEffort: null,
   systemPromptMode: 'native',
   stream: true,
   includeUsage: true,
@@ -516,12 +527,72 @@ export interface DedicatedStatus {
   models: string[];
   /** Context window the server reports for the selected model, when it says. */
   contextSize?: number;
+  /** Whether the model reads images: what the server reports, or false once it refused one. */
   vision?: boolean;
+  /** Whether the model thinks, when the server says (Ollama). */
+  thinking?: boolean;
   latencyMs?: number;
   /** How the token was sent when the check succeeded. */
   authHeader?: Exclude<DedicatedAuthHeader, 'auto'>;
   /** What the server answered to each check request, for troubleshooting (token removed). */
   details?: string[];
+}
+
+// ---------- What dedicated models can do ----------
+
+/**
+ * How a local model thinks:
+ * - toggle: thinking can be turned on and off (Qwen3; Ollama's "think" for any model it says thinks)
+ * - effort: always reasons, at a chosen effort (gpt-oss)
+ * - always: always thinks, with nothing to set (DeepSeek-R1, QwQ, "-Thinking" models)
+ */
+export type LocalThinking = 'toggle' | 'effort' | 'always';
+
+/** What's known about a model from its name, for when its server doesn't say. Unknown fields are left out. */
+export interface LocalModelHint {
+  /** Shown as the source of a fact, e.g. "(Gemma 3)". */
+  family?: string;
+  contextSize?: number;
+  vision?: boolean;
+  thinking?: LocalThinking;
+  /** Tokens each image takes, for estimating. */
+  imageTokens?: number;
+  /** Sampling its makers recommend. */
+  sampling?: { temperature: number; topP: number; topK: number; minP: number };
+}
+
+const VISION_NAME = /llava|pixtral|vision|multimodal|minicpm-?v|internvl|moondream|llama-?4|mistral-small-3\.[12]|vl(\b|_)/;
+
+/** Facts from a model name as servers report it: "gemma3:27b", "Qwen/Qwen3-8B", "openai/gpt-oss-20b", "qwen2.5vl:7b"… */
+export function localModelHint(name: string): LocalModelHint | null {
+  const n = name.toLowerCase();
+  const hint: LocalModelHint = {};
+  const gemma3 = { temperature: 1, topP: 0.95, topK: 64, minP: 0 };
+  const small = n.match(/gemma-?3.*[-:_](1b|270m)\b/);
+  if (/gemma-?3n/.test(n)) Object.assign(hint, { family: 'Gemma 3n', contextSize: 32_768, sampling: gemma3 });
+  else if (small) Object.assign(hint, { family: `Gemma 3 ${small[1].toUpperCase()}`, contextSize: 32_768, vision: false, sampling: gemma3 });
+  else if (/gemma-?3/.test(n)) Object.assign(hint, { family: 'Gemma 3', contextSize: 131_072, vision: true, imageTokens: 256, sampling: gemma3 });
+  else if (/gemma-?2/.test(n)) Object.assign(hint, { family: 'Gemma 2', contextSize: 8_192, vision: false });
+  else if (/gpt-?oss/.test(n)) Object.assign(hint, { family: 'gpt-oss', contextSize: 131_072, vision: false, thinking: 'effort' });
+  else if (/deepseek-?r1|qwq|thinking/.test(n)) hint.thinking = 'always';
+  else if (/qwen3/.test(n) && !/instruct|coder|embed/.test(n)) hint.thinking = 'toggle';
+  if (hint.vision === undefined && VISION_NAME.test(n)) hint.vision = true;
+  return Object.keys(hint).length ? hint : null;
+}
+
+/** How a dedicated server's model thinks: as its server says (Ollama), else as its name suggests; null if it doesn't. */
+export function localThinking(model: string, reported?: boolean): LocalThinking | null {
+  if (reported === false) return null;
+  const known = localModelHint(model)?.thinking;
+  return known ?? (reported ? 'toggle' : null);
+}
+
+/**
+ * Whether a dedicated server's model is sent images: when the setting allows it and the model reads them, as its
+ * server says, else as its name suggests. When neither says, images are sent; a refusal then marks the model as text-only.
+ */
+export function localReadsImages(srv: Pick<DedicatedModelSettings, 'vision'>, model: string, reported?: boolean): boolean {
+  return srv.vision && (reported ?? localModelHint(model)?.vision ?? true);
 }
 
 // ---------- Dedicated server addresses ----------

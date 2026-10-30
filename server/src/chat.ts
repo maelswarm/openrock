@@ -16,7 +16,7 @@ import { saveConversation, summarize, titleFrom } from './store/conversations.js
 import { recordUsage } from './store/usage.js';
 import { resolveBedrockModel } from './providers/bedrock-models.js';
 import { bedrockChat } from './providers/bedrock.js';
-import { cachedDedicatedModel, dedicatedChat } from './providers/dedicated.js';
+import { dedicatedChat, dedicatedModelFacts } from './providers/dedicated.js';
 import { ProviderError, type LoadedAttachment, type NeutralMessage, type ProviderEvent } from './providers/types.js';
 import { HttpError, errorMessage, isAbortError, newId } from './util.js';
 
@@ -30,22 +30,26 @@ export function findServer(settings: Settings, id: string): DedicatedServer {
   return srv;
 }
 
-/** In dedicated mode each server is one entry in the model menu. baseId is the model the server runs, once known. */
+/**
+ * In dedicated mode each server is one entry in the model menu. baseId is the model the server runs, once known, and
+ * what the chat offers follows what that model can do.
+ */
 export function dedicatedModelInfo(srv: DedicatedServer): ModelInfo {
+  const facts = dedicatedModelFacts(srv);
   return {
     id: srv.id,
-    baseId: cachedDedicatedModel(srv),
+    baseId: facts.model,
     name: srv.name,
     provider: 'Dedicated',
     mode: 'dedicated',
     capabilities: {
-      images: srv.vision,
+      images: facts.images,
       documents: false,
       video: false,
       text: true,
       streaming: srv.stream,
       systemPrompt: true,
-      reasoning: false,
+      reasoning: facts.thinking !== null,
       maxImages: srv.maxImages,
       maxDocuments: 0,
     },
